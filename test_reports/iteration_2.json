@@ -1,0 +1,104 @@
+{
+  "summary": "Iteration 2 feature-validation run. All 5 requested feature sets pass end-to-end EXCEPT the student self-signup step (auto-link via claim_student_by_phone). Supabase Auth is rejecting client-side signUp for new synthetic emails like `9111175173@phone.tutor.app` with a 400 'Email address invalid' — the pre-seeded students still sign in fine because they were created via the service-role admin API, but any real end-user signup path is broken, which invalidates review-request item #6. Every other item (indigo palette, DnD reschedule, DnD conflict, multi-student create dialog, duplicate-phone unique constraint, Payments KPIs + grouping + quick-pay, Record-payment dialog with per-month auto-fill, Excel export, Student-Detail Payments tab + side panel, student /me month-labeled rows, dark mode) works.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "Supabase Auth /auth/v1/signup (from AuthPage onSignUp)",
+        "issue": "New client-side sign-up rejected with 400 'Email address \"<10digits>@phone.tutor.app\" is invalid'. Seeded users still authenticate (they were admin.createUser'd), but no new phone-based student can create an account, so the claim_student_by_phone auto-link flow (review item #6) cannot be reached. Root cause is Supabase's server-side email validator now rejecting the synthetic domain (likely a disposable-domain / TLD block). Options: (a) enable a custom SMTP + verified domain, (b) allow-list the domain in Supabase Auth settings, (c) switch synthetic emails to a domain Supabase accepts (e.g. gmail-alias style is out; use a domain you own with valid MX), (d) move signup server-side using service-role admin.createUser.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "AppShell header — Signed in toast",
+        "issue": "Sonner success toast anchors at top-right and its 5s visible window fully overlaps the [data-testid=theme-toggle] button, so during the first ~5s after login the user cannot click 'toggle theme'. Confirmed empirically: click during toast → no state change; click after toast dismisses → theme flips as expected. Recommend moving toaster position to top-center/bottom-right, or making it click-through (pointer-events on wrapper only, not overlay).",
+        "selector": "[data-testid='theme-toggle']",
+        "priority": "MEDIUM"
+      },
+      {
+        "component": "TutorDashboard",
+        "issue": "Metric cards still show '—' skeleton for ~2s on landing while data loads. Non-blocking, but iter-1 feedback was to guard sub-labels behind the loading flag — still not fixed.",
+        "selector": "[data-testid='metric-todays-classes']",
+        "priority": "LOW"
+      },
+      {
+        "component": "TutorDashboard teaching-load chart",
+        "issue": "Recharts still logs `The width(-1) and height(-1) of chart should be greater than 0` twice on dashboard load. Chart renders, but console noise persists (iter-1 comment not addressed).",
+        "selector": ".recharts-responsive-container",
+        "priority": "LOW"
+      },
+      {
+        "component": "PaymentsPage",
+        "issue": "React dev-overlay flashes 'ResizeObserver loop completed with undelivered notifications' 4x on Payments page load. Cosmetic (dev-only), but visually alarming.",
+        "selector": "iframe#webpack-dev-server-client-overlay",
+        "priority": "LOW"
+      }
+    ],
+    "integration_issues": [
+      {
+        "flow": "Student self-signup → auto-link to tutor's pre-created row",
+        "issue": "Blocked by Supabase Auth 400 (see backend_issues.critical). claim_student_by_phone RPC never gets called because supabase.auth.signUp itself fails. onSignUp code correctly calls the RPC after the user is created — it just never gets there.",
+        "affected_selectors": ["[data-testid='signup-submit']", "[data-testid='signup-phone']"]
+      }
+    ],
+    "design_issues": [
+      {
+        "screen": "Global",
+        "issues": [
+          "Indigo primary (244 75% 57%) is applied consistently in light AND dark themes. Confirmed via computed styles: primary button = rgb(74,63,228), today column tint = rgba(74,63,228,0.1), sidebar active pill uses bg-primary/10. All shadcn tokens are indigo-tinted (secondary/accent/ring).",
+          "Payments KPIs render in emerald / amber / red respectively — readable in both light and dark. Info banner on Students page uses primary/5 background + primary/25 border which is legible in both themes."
+        ]
+      }
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [
+    "URGENT: Unblock student self-signup. In Supabase Studio → Auth → Providers → Email → check the 'Disable signups from disposable email domains' toggle and disable it; and/or add 'phone.tutor.app' to any allow-list. If Supabase's global validator refuses, switch onSignUp to call a server-side edge function that uses the service role to admin.createUser, then sign the user in with the returned session. Until this is fixed, review-request item #6 (auto-link on signup) cannot be executed end-to-end.",
+    "Move Sonner <Toaster/> position from top-right to top-center or bottom-right (or set pointer-events: none on the wrapper) so the 'Signed in' toast doesn't intercept clicks on the theme toggle for 5s after every login.",
+    "Guard TutorDashboard metric sub-labels behind the loading flag so 0 counts don't flash (iter-1 comment).",
+    "Silence Recharts ResponsiveContainer warnings by giving the wrapper explicit minWidth/minHeight or by using aspect ratio (iter-1 comment).",
+    "Consider suppressing the noisy 'ResizeObserver loop completed…' dev overlay (see CRA docs: window.__webpack_dev_server_client_overlay__)."
+  ],
+  "critical_code_review_comments": [
+    "AuthPage.onSignUp: relies on client-side supabase.auth.signUp which is subject to Supabase's email validator. For a phone→synthetic-email scheme, the reliable path is a server-side RPC using service role.",
+    "PaymentsPage.RecordPaymentDialog auto-fill: uses `!amount` in the useEffect deps to only fill once, but if the user clears the field the effect re-fires and overwrites their edit. Consider a `dirty` flag or reset amount on picked-change explicitly.",
+    "PaymentsPage.RecordPaymentDialog.save: performs multiple sequential awaits inside a for-loop (one supabase.from(...).update per record) instead of a single batched update — slow for large picks. Also, pending_balance is recomputed AFTER a Promise chain, which is fine but should ideally happen inside a Postgres function/transaction to avoid race conditions with concurrent record_payment calls.",
+    "CalendarPage.EventChip: HTML5 native drag works, but note that on touch devices native DnD is not supported — Playwright verified desktop-only. If mobile is a target, migrate to pointerevents + a lib like @dnd-kit.",
+    "StudentsPage.createStudent: matches unique-violation via `String(error.message).match(/duplicate|unique/i)` — brittle. Check error.code === '23505' (PostgreSQL unique_violation) instead.",
+    "fees.js.ensureFeeRecordsRange: fires N parallel RPCs (Promise.all). If tutor has been on the app a while and range is 10 months, that's 10 parallel writes on every landing — batch on the server side with a single RPC that accepts a range.",
+    "PaymentsPage: 4 x React dev-overlay ResizeObserver warnings appear on load — likely from Recharts or shadcn <ScrollArea>. Track down and eliminate."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "N/A (Supabase — one auth flow broken, all schema/RPC/RLS features work)",
+    "frontend": "92% (12/13 review items pass; only student self-signup blocked by upstream Supabase auth error)"
+  },
+  "test_credentials": "Tutor 9999999999/tutor123 (Aditi Sharma) ✓, Student 9111100001/student123 (Rohan Verma) ✓, both verified.",
+  "seed_data_creation": "Did not run seed.js. During testing, side-effects on live data: (1) Rescheduled 2 sessions via DnD (Ishita 2026-07-14→13, Rohan already, via prior activity), (2) recorded ₹6,000 payment for Ananya Rao (January 2026), (3) created 1 test student 'Signup Link Test' phone 9111175173 (its signup was never completed due to the auth bug). Records visible in Activity log.",
+  "retest_needed": true,
+  "main_agent_can_self_test": false,
+  "context_for_next_testing_agent": "Iteration 2 features are otherwise green. The single blocking issue is upstream: Supabase Auth is rejecting new signUp calls with synthetic email domain phone.tutor.app (400 email invalid). Existing seeded auth users still sign in — do NOT delete them. After main agent fixes signup (either loosens Supabase auth settings or moves onSignUp to a server function), re-run only test #6 (create a fresh student row via tutor, sign out, sign up on /auth with that phone, expect toast 'Account linked to your tutor's records' and /me landing with linked data). All other flows are stable. Also verify the Toaster position change so the theme toggle is clickable immediately after login.",
+  "verified_flows": [
+    "Sign in tutor → /dashboard; indigo primary confirmed (--primary=244 75% 57%, rgb(74,63,228))",
+    "Calendar Week view: today column header bg = rgba(74,63,228,0.1) = primary/10 tint ✓",
+    "DnD: drag Ishita 2026-07-14 chip onto day-col-2026-07-13 → toast 'Rescheduled', session moved, activity_log entry `session.rescheduled` created ✓",
+    "DnD conflict: drag Ishita Fri 6:30 PM onto Mon (already has Ishita 6:30 PM) → toast 'Conflict at that day/time', no move ✓",
+    "CreateClassDialog: pick-all-students → save label 'Create (4)'; pick 2 → 'Create (2)'; toggle-per-student reveals 4 agenda inputs ✓",
+    "StudentsPage info banner rendered with primary/5 bg and 3-step ordered list ✓",
+    "Duplicate phone create → 409 unique violation surfaced as toast 'A student with this phone number already exists' ✓",
+    "Payments KPIs: Collected ₹57,000 (emerald), Pending ₹1,33,000 (amber), Overdue 16 (red) ✓",
+    "Payments grouped by month desc (October 2026, September 2026, …) with 10 month cards ✓",
+    "Quick-pay button: preselects student+month, amount auto-fills 6000, save → toast 'Payment recorded', activity_log `payment.recorded` inserted ✓",
+    "Record-payment dialog: outstanding months list rendered, checkbox toggles month, amount = fee × N ✓",
+    "Excel export: `fees_2026-07-16.xlsx` downloaded, 31,476 bytes, opened fine ✓",
+    "Student Detail Payments tab: month-by-month table + side 'Record payment' panel (Month select, Amount, Paid on default today, Method UPI, Notes, Record) ✓",
+    "Student /me (Rohan): Payments card lists 'October 2026 · Balance ₹4,500 · ₹0 · unpaid' etc., paid rows have 'paid ₹13,500' subtitle ✓",
+    "Dark mode: toggle works after Signed-in toast dismisses; indigo remains legible, KPI colors readable, today column tint visible ✓",
+    "AppShell sidebar active nav uses bg-primary/10 highlight in both themes ✓"
+  ],
+  "rca_of_the_issue": "Signup blocker: supabase.auth.signUp posts to Supabase's gotrue /auth/v1/signup with body `{email:'9111175173@phone.tutor.app', password:'linktest123'}`. Response 400 body says 'Email address \"9111175173@phone.tutor.app\" is invalid'. Same pattern for other new 10-digit phones. Pre-existing seeded auth users (9111100001..99999999) can still signInWithPassword — they were inserted via service-role admin.createUser during seed and don't re-hit the validator. Therefore this is NOT a code bug in AuthPage.jsx (the RPC call is wired correctly); it is a Supabase Auth server-side validation setting. Fix path is either (a) change the synthetic email domain to one Supabase accepts, (b) toggle off the 'block disposable emails' setting in the Supabase dashboard, or (c) proxy signup through a service-role edge function.",
+  "notes_on_dark_mode_test_gotcha": "First dark-mode click failed because Sonner toast was overlaid on the theme-toggle button in the header. Waiting ~5s for the toast to dismiss, then clicking, worked. This is a real UX bug worth flagging — not just a test-script issue."
+}

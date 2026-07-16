@@ -1,0 +1,74 @@
+{
+  "summary": "First end-to-end frontend test of Tutor Management System. All core tutor + student flows work (auth, dashboard metrics, calendar Day/Week/Month/Agenda, event drawer, attendance actions, class create + conflict detection, students CRUD/archive, student detail tabs, record payment, tests page, payments KPIs, activity, settings, theme toggle, sign out, student /me with RLS scoped data, SPA redirect to /403 on unauthorized route). Discovered ONE critical bug: after a signed-in user hard-reloads any route (or opens a deep link), the app hangs forever on 'Loading…'. Same bug affects both tutor and student.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "AuthContext / App.js",
+        "issue": "CRITICAL: After signing in (tutor or student), any hard reload (F5) or direct navigation via URL bar to any route (/dashboard, /me, /students, /calendar, /500, /nope, etc.) results in the entire app being stuck on the 'Loading…' screen indefinitely. Verified 25s+ wait on multiple routes for both tutor and student sessions. This breaks refresh, deep-links, bookmarks, and shared URLs while authenticated. In-app SPA navigation (clicking sidebar links) works fine; only hard page loads with an existing Supabase session in localStorage are affected.",
+        "selector": "body:has-text('Loading…')",
+        "priority": "CRITICAL"
+      },
+      {
+        "component": "TutorDashboard",
+        "issue": "Metric strip and Today's Schedule remain in skeleton/'—' state for ~5 seconds after landing on /dashboard. Not broken (data eventually loads), but the sub-labels ('0 active students', '0 students', '0') render immediately with 0 counts because `activeStudents.length` is computed on undefined→empty array while loading. Consider guarding the sub-labels with the same `sL || seL` loading flag, otherwise users briefly see misleading zeros.",
+        "selector": "[data-testid='metric-todays-classes']",
+        "priority": "MEDIUM"
+      },
+      {
+        "component": "TutorDashboard - Teaching load chart",
+        "issue": "Recharts logs multiple warnings 'The width(-1) and height(-1) of chart should be greater than 0'. Chart eventually renders but is flagged as an anti-pattern. Add explicit minWidth/minHeight or use aspect ratio to eliminate the warnings.",
+        "selector": ".recharts-responsive-container",
+        "priority": "LOW"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [
+    "FIX CRITICAL: In /app/frontend/src/contexts/AuthContext.jsx, the initial useEffect awaits `loadProfile()` before `setLoading(false)`. On a fresh page load with an existing Supabase session, either `getSession()` or `loadProfile()` appears to hang, leaving `loading=true` forever. Suggested fixes: (a) call `setLoading(false)` in a `.finally()` so it always runs, (b) add a `.catch()` on the promise chain to log/handle failure, (c) do not block the render on the profile fetch — set loading=false as soon as session is resolved, and let ProtectedRoute show 'Setting up your profile…' while profile loads, (d) add a 5-8s timeout guard.",
+    "Reproduce: sign in as tutor (9999999999/tutor123) → wait for /dashboard → run page.goto('/dashboard') or hit F5 → screen freezes on 'Loading…' indefinitely.",
+    "Consider guarding TutorDashboard metric sub-labels behind the loading flag so users don't see '0 active students' during the initial load window.",
+    "Fix Recharts ResponsiveContainer sizing warnings on TutorDashboard."
+  ],
+  "critical_code_review_comments": [
+    "AuthContext.jsx: `getSession().then(...)` has no `.catch()`; if it rejects, `loading` never becomes false. Same for `loadProfile()`. Wrap in try/finally.",
+    "App.js top-level `if (loading) return 'Loading…'` blocks the entire router — including the top-level error pages /401 /403 /500 and 404. If AuthContext ever gets stuck, users cannot even see error pages. Consider rendering error pages independent of auth loading state, or bounding the loading gate with a timeout.",
+    "AuthContext.jsx onAuthStateChange handler does not update `loading`; if the initial getSession fails, subsequent auth state changes will still not clear the loading gate.",
+    "CalendarPage `.eq(status, tutor_cancelled).neq(status, student_cancelled)` conflict check uses two chained neq calls — Supabase applies them as AND, which is correct, but this pattern is easy to break; prefer `.not('status','in','(tutor_cancelled,student_cancelled)')` for clarity.",
+    "StudentsPage query uses `q.or('full_name.ilike.%X%,phone.ilike.%X%,notes.ilike.%X%')` with unescaped user input — potential PostgREST injection surface if `q` contains commas or parens. Consider escaping."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "N/A (Supabase, not tested here)",
+    "frontend": "95% (all functional flows work; 1 critical hard-reload bug)"
+  },
+  "test_credentials": "Tutor 9999999999/tutor123 (Aditi Sharma), Students 9111100001/student123 (Rohan), 9111100002/student123 (Ishita) — verified working. Seed data is present (5 profiles, 4 students, 53 sessions, 4 payments, 4 activity logs).",
+  "seed_data_creation": "No seed created. Verified existing seed via service-role query on Supabase. `cd /app/supabase && node seed.js` is available if needed.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All happy-path tutor and student flows pass. The one blocking bug is in AuthContext + App.js loading gate — hard reloads while signed in freeze the app on 'Loading…' forever. In-app SPA navigation (clicking nav items) is unaffected. After the AuthContext fix, verify: (1) page.goto('/dashboard') resolves within 5s while signed in as tutor, (2) same for /me as student, (3) /500 and /403 render without needing to sign out, (4) F5 on any route stays on that route with data. All data-testid selectors listed in the review request are present and working.",
+  "verified_flows": [
+    "Tutor sign-in → /dashboard with metric-todays-classes=1, metric-pending-payments=₹9,500, metric-upcoming-tests=4, todays-schedule and recent-activity panels populated",
+    "Sidebar navigation Dashboard/Calendar/Students/Tests/Payments/Activity/Settings all load with correct page-title",
+    "Calendar Day/Week/Month/Agenda tabs all work; Week is default; Prev/Next/Today shift range; event- chips render (7 events in current week)",
+    "Event click → Sheet drawer opens with student name, kind/status badges, and mark-present/mark-absent/mark-tutor-cancel/mark-student-cancel buttons",
+    "New class dialog conflict detection: creating overlapping class same day/time yields toast 'Scheduling conflict at that time'",
+    "Students page: 4 seeded rows; search 'Rohan' filters to 1 row; Active/Archived/All tabs work",
+    "Student detail page loads via row click; 3 tabs (Weekly schedule, Attendance history, Payments); Record payment reduces pending_balance and adds to list (₹3000 → ₹2500)",
+    "Tests page has Upcoming/Past tabs",
+    "Payments page shows 3 KPIs (Collected ₹10,000, Pending ₹9,000, Active students 4) + Outstanding list",
+    "Activity page loads",
+    "Settings page loads; theme-toggle adds/removes `dark` class on <html>",
+    "Sign out from user menu returns to /auth",
+    "Student sign-in (Rohan) → /me with correct data (₹2,250 pending, 100% attendance, weekly Mon+Thu 5-6 PM); sidebar shows only Overview/Calendar/Tests/Fees/Settings (no Students, no Activity)",
+    "Student SPA navigation to /students → auto-redirects to /403 ForbiddenPage",
+    "Fresh /500 renders ServerErrorPage; /403 renders ForbiddenPage; /nope renders NotFoundPage (all when not signed in)",
+    "RLS: Rohan's /me correctly shows only his data (balance ₹2,250, not Ishita's ₹2,500)"
+  ],
+  "rca_of_the_issue": "AuthContext.jsx initial useEffect: `supabase.auth.getSession().then(async ({ data }) => { setSession(...); await loadProfile(...); setLoading(false); })` — the `setLoading(false)` sits inside a `.then` with an `await` on `loadProfile`, and there is no `.catch()` or `.finally()`. On a fresh JS load with an existing session cached in localStorage (`sb-<project>-auth-token`), the promise chain appears to never resolve (empirically observed: 25s+ stuck at 'Loading…' across multiple runs). App.js gates the entire router behind `if (loading) return 'Loading…'`, so nothing else can render. Mitigation: wrap in try/catch, use `.finally(() => setLoading(false))`, or decouple the profile fetch from the auth-loaded gate."
+}
